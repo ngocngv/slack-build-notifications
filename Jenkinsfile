@@ -7,7 +7,7 @@ def slackNotificationChannel = '[builds]'
 
 def notifySlack(text, channel, attachments) {
     //def slackURL = '[SLACK_WEBHOOK_URL]'
-    def slackURL = '[https://hooks.slack.com/services/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]'
+    def slackURL = '[https://hooks.slack.com/services/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]'
 
     def jenkinsIcon = 'https://wiki.jenkins-ci.org/download/attachments/2916393/logo.png'
 
