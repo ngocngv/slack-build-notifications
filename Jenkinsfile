@@ -1,4 +1,6 @@
-#!groovy
+#!/usr/bin/env groovy
+
+//base: https://www.christopherrung.com/2017/05/04/slack-build-notifications/
 
 import groovy.json.JsonOutput
 import java.util.Optional
@@ -42,8 +44,197 @@ def notifySlack(text, channel, attachments) {
     sh "curl -X POST --data-urlencode \'payload=${payload}\' ${slackURL}"
 }
 
+def getGitAuthor = {
+    def commit = sh(returnStdout: true, script: 'git rev-parse HEAD')
+    author = sh(returnStdout: true, script: "git --no-pager show -s --format='%an' ${commit}").trim()
+}
+
+def getLastCommitMessage = {
+    message = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
+}
+
+@NonCPS
+def getTestSummary = { ->
+    def testResultAction = currentBuild.rawBuild.getAction(AbstractTestResultAction.class)
+    def summary = ""
+
+    if (testResultAction != null) {
+        total = testResultAction.getTotalCount()
+        failed = testResultAction.getFailCount()
+        skipped = testResultAction.getSkipCount()
+
+        summary = "Passed: " + (total - failed - skipped)
+        summary = summary + (", Failed: " + failed)
+        summary = summary + (", Skipped: " + skipped)
+    } else {
+        summary = "No tests found"
+    }
+    return summary
+}
+
+@NonCPS
+def getFailedTests = { ->
+    def testResultAction = currentBuild.rawBuild.getAction(AbstractTestResultAction.class)
+    def failedTestsString = "```"
+
+    if (testResultAction != null) {
+        def failedTests = testResultAction.getFailedTests()
+        
+        if (failedTests.size() > 9) {
+            failedTests = failedTests.subList(0, 8)
+        }
+
+        for(CaseResult cr : failedTests) {
+            failedTestsString = failedTestsString + "${cr.getFullDisplayName()}:\n${cr.getErrorDetails()}\n\n"
+        }
+        failedTestsString = failedTestsString + "```"
+    }
+    return failedTestsString
+}
+
+def populateGlobalVariables = {
+    getLastCommitMessage()
+    getGitAuthor()
+    testSummary = getTestSummary()
+}
+
 node {
-    stage("Post to Slack") {
-        notifySlack("Success!", slackNotificationChannel, [])
+    try {
+        stage('Checkout') {
+            checkout scm
+        }
+
+        stage('Build') {
+            sh "./gradlew ${gradleDefaultSwitches} clean build ${gradleAdditionalTestTargets} ${gradleAdditionalSwitches} --refresh-dependencies"
+            step $class: 'JUnitResultArchiver', testResults: '**/TEST-*.xml'
+
+            populateGlobalVariables()
+
+            def buildColor = currentBuild.result == null ? "good" : "warning"
+            def buildStatus = currentBuild.result == null ? "Success" : currentBuild.result
+            def jobName = "${env.JOB_NAME}"
+
+            // Strip the branch name out of the job name (ex: "Job Name/branch1" -> "Job Name")
+            jobName = jobName.getAt(0..(jobName.indexOf('/') - 1))
+        
+            if (failed > 0) {
+                buildStatus = "Failed"
+
+                if (isPublishingBranch()) {
+                    buildStatus = "MasterFailed"
+                }
+
+                buildColor = "danger"
+                def failedTestsString = getFailedTests()
+
+                notifySlack("", slackNotificationChannel, [
+                    [
+                        title: "${jobName}, build #${env.BUILD_NUMBER}",
+                        title_link: "${env.BUILD_URL}",
+                        color: "${buildColor}",
+                        text: "${buildStatus}\n${author}",
+                        "mrkdwn_in": ["fields"],
+                        fields: [
+                            [
+                                title: "Branch",
+                                value: "${env.GIT_BRANCH}",
+                                short: true
+                            ],
+                            [
+                                title: "Test Results",
+                                value: "${testSummary}",
+                                short: true
+                            ],
+                            [
+                                title: "Last Commit",
+                                value: "${message}",
+                                short: false
+                            ]
+                        ]
+                    ],
+                    [
+                        title: "Failed Tests",
+                        color: "${buildColor}",
+                        text: "${failedTestsString}",
+                        "mrkdwn_in": ["text"],
+                    ]
+                ])          
+            } else {
+                notifySlack("", slackNotificationChannel, [
+                    [
+                        title: "${jobName}, build #${env.BUILD_NUMBER}",
+                        title_link: "${env.BUILD_URL}",
+                        color: "${buildColor}",
+                        author_name: "${author}",
+                        text: "${buildStatus}\n${author}",
+                        fields: [
+                            [
+                                title: "Branch",
+                                value: "${env.GIT_BRANCH}",
+                                short: true
+                            ],
+                            [
+                                title: "Test Results",
+                                value: "${testSummary}",
+                                short: true
+                            ],
+                            [
+                                title: "Last Commit",
+                                value: "${message}",
+                                short: false
+                            ]
+                        ]
+                    ]
+                ])
+            }
+        }
+        
+        if (isPublishingBranch() && isResultGoodForPublishing()) {
+            stage ('Publish') {
+                sh "./gradlew ${gradleDefaultSwitches}"
+            }
+        }
+    } catch (hudson.AbortException ae) {
+        // I ignore aborted builds, but you're welcome to notify Slack here
+    } catch (e) {
+        def buildStatus = "Failed"
+
+        if (isPublishingBranch()) {
+            buildStatus = "MasterFailed"
+        }
+
+        notifySlack("", slackNotificationChannel, [
+            [
+                title: "${env.JOB_NAME}, build #${env.BUILD_NUMBER}",
+                title_link: "${env.BUILD_URL}",
+                color: "danger",
+                author_name: "${author}",
+                text: "${buildStatus}",
+                fields: [
+                    [
+                        title: "Branch",
+                        value: "${env.GIT_BRANCH}",
+                        short: true
+                    ],
+                    [
+                        title: "Test Results",
+                        value: "${testSummary}",
+                        short: true
+                    ],
+                    [
+                        title: "Last Commit",
+                        value: "${message}",
+                        short: false
+                    ],
+                    [
+                        title: "Error",
+                        value: "${e}",
+                        short: false
+                    ]
+                ]
+            ]
+        ])
+
+        throw e
     }
 }
