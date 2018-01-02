@@ -105,7 +105,7 @@ node {
         }
 
         stage('Build') {
-            sh "./gradlew ${gradleDefaultSwitches} clean build ${gradleAdditionalTestTargets} ${gradleAdditionalSwitches} --refresh-dependencies"
+            sh "gradle ${gradleDefaultSwitches} clean build ${gradleAdditionalTestTargets} ${gradleAdditionalSwitches} --refresh-dependencies"
             step $class: 'JUnitResultArchiver', testResults: '**/TEST-*.xml'
 
             populateGlobalVariables()
